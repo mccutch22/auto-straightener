@@ -124,11 +124,14 @@ def detect_vertical_correction(
                 continue
 
             angle_deg = math.degrees(math.atan2(dy, dx))
-            # Convert line angle into offset from true vertical.
-            # Vertical is +/-90 degrees.
-            offset_from_vertical = angle_deg - 90 if angle_deg >= 0 else angle_deg + 90
 
-            # Keep only near-vertical lines.
+            # Normalize line angle to [0, 180)
+            theta = (angle_deg + 180.0) % 180.0
+
+            # Deviation from true vertical (90 degrees)
+            offset_from_vertical = theta - 90.0
+
+            # Keep only near-vertical lines
             if abs(offset_from_vertical) <= max_correction_deg:
                 vertical_candidates += 1
                 angle_offsets.append(offset_from_vertical)
@@ -145,9 +148,7 @@ def detect_vertical_correction(
             "reason": "no_vertical_candidates",
         }, debug_img
 
-    correction = weighted_median(angle_offsets, weights)
-
-    # To make lines vertical, rotate opposite the measured offset.
+       correction = -weighted_median(angle_offsets, weights)
     correction = float(np.clip(correction, -max_correction_deg, max_correction_deg))
 
     return correction, {
