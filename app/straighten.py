@@ -180,7 +180,7 @@ def auto_straighten_verticals(
         max_correction_deg=max_correction_deg,
     )
 
-    corrected = rotate_bound(working_bgr, -correction_angle_deg)
+    corrected = rotate_bound(working_bgr, correction_angle_deg)
     corrected = crop_largest_rect_from_rotated(corrected)
 
     return StraightenResult(
