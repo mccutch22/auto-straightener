@@ -64,6 +64,8 @@ def straighten(
 
         result = auto_straighten_verticals(
             original_bgr=image_bgr,
+            mode=payload.mode,
+            crop_mode=payload.crop_mode,
             max_dimension=payload.max_dimension,
             canny_threshold1=payload.canny_threshold1,
             canny_threshold2=payload.canny_threshold2,
@@ -71,6 +73,10 @@ def straighten(
             min_line_length_ratio=payload.min_line_length_ratio,
             max_line_gap=payload.max_line_gap,
             max_correction_deg=payload.max_correction_deg,
+            perspective_strength=payload.perspective_strength,
+            minimum_confidence=payload.minimum_confidence,
+            max_perspective_ratio=payload.max_perspective_ratio,
+            max_crop_fraction=payload.max_crop_fraction,
             return_debug=payload.save_debug,
         )
 
@@ -88,6 +94,10 @@ def straighten(
             success=True,
             corrected_url=corrected_url,
             correction_angle_deg=result.correction_angle_deg,
+            perspective_applied=result.perspective_applied,
+            confidence=result.confidence,
+            crop_fraction=result.crop_fraction,
+            applied_mode=result.applied_mode,
             debug_url=debug_url,
             debug=result.debug,
         )
