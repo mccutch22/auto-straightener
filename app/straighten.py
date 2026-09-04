@@ -111,43 +111,115 @@ def detect_vertical_segments(
         if accepted:
             segments.append(LineSegment((x1, y1), (x2, y2), length, offset))
 
-    # Pairwise vanishing-point work grows quadratically; long lines carry the
-    # most reliable architectural signal, so keep the strongest set.
-    segments.sort(key=lambda segment: segment.length, reverse=True)
-    return segments[:48], total_lines, debug_img
+    # Pairwise vanishing-point work grows quadratically. Keep strong lines, but
+    # distribute them across the frame so one repetitive object (cabinet doors,
+    # shelving, stacked panels) cannot overwhelm the room geometry.
+    bucket_count = 8
+    bucket_limit = 12
+    buckets: list[list[LineSegment]] = [[] for _ in range(bucket_count)]
+    for segment in segments:
+        midpoint_x = (segment.p1[0] + segment.p2[0]) / 2.0
+        bucket_index = min(bucket_count - 1, max(0, int(midpoint_x / max(w, 1) * bucket_count)))
+        buckets[bucket_index].append(segment)
+
+    balanced_segments: list[LineSegment] = []
+    for bucket in buckets:
+        bucket.sort(key=lambda segment: segment.length, reverse=True)
+        balanced_segments.extend(bucket[:bucket_limit])
+    balanced_segments.sort(key=lambda segment: segment.length, reverse=True)
+    return balanced_segments, total_lines, debug_img
 
 
-def estimate_roll(segments: list[LineSegment], max_correction_deg: float) -> tuple[float, float, dict]:
+def estimate_roll(
+    segments: list[LineSegment], max_correction_deg: float, image_width: float | None = None
+) -> tuple[float, float, dict]:
     if not segments:
         return 0.0, 0.0, {"reason": "no_vertical_candidates"}
 
-    offsets = [segment.offset_from_vertical_deg for segment in segments]
-    weights = [segment.length for segment in segments]
-    median = weighted_median(offsets, weights)
+    if image_width is None:
+        image_width = max(max(segment.p1[0], segment.p2[0]) for segment in segments)
+    image_width = max(float(image_width), 1.0)
+
+    # First summarize evidence within vertical strips, then combine the strips
+    # with capped support. This preserves the precision of repeated edges while
+    # preventing one localized subject from receiving dozens of votes.
+    bucket_count = 8
+    buckets: list[list[LineSegment]] = [[] for _ in range(bucket_count)]
+    for segment in segments:
+        midpoint_x = (segment.p1[0] + segment.p2[0]) / 2.0
+        bucket_index = min(bucket_count - 1, max(0, int(midpoint_x / image_width * bucket_count)))
+        buckets[bucket_index].append(segment)
+
+    bucket_offsets: list[float] = []
+    bucket_support: list[float] = []
+    occupied_midpoints: list[float] = []
+    for bucket in buckets:
+        if not bucket:
+            continue
+        weights = [segment.length for segment in bucket]
+        bucket_offsets.append(
+            weighted_median([segment.offset_from_vertical_deg for segment in bucket], weights)
+        )
+        bucket_support.append(sum(weights))
+        occupied_midpoints.extend((segment.p1[0] + segment.p2[0]) / 2.0 for segment in bucket)
+
+    support_cap = float(np.median(bucket_support))
+    balanced_weights = [min(support, support_cap) for support in bucket_support]
+    median = weighted_median(bucket_offsets, balanced_weights)
     # OpenCV's image-coordinate rotation convention corrects a detected line by
     # applying the measured offset itself (not its arithmetic opposite).
     correction = float(np.clip(median, -max_correction_deg, max_correction_deg))
-    deviations = [abs(value - median) for value in offsets]
-    mad = weighted_median(deviations, weights)
+    deviations = [abs(value - median) for value in bucket_offsets]
+    mad = weighted_median(deviations, balanced_weights)
 
     line_support = min(1.0, len(segments) / 10.0)
+    bucket_support_score = min(1.0, len(bucket_offsets) / 4.0)
+    horizontal_span = (max(occupied_midpoints) - min(occupied_midpoints)) / image_width
+    spatial_support = min(1.0, horizontal_span / 0.45)
     consistency = math.exp(-mad / 4.0)
-    confidence = float(np.clip(line_support * consistency, 0.0, 1.0))
+    confidence = float(
+        np.clip(line_support * consistency * math.sqrt(bucket_support_score * spatial_support), 0.0, 1.0)
+    )
     return correction, confidence, {
         "median_vertical_offset_deg": round(median, 4),
         "angle_mad_deg": round(mad, 4),
+        "occupied_horizontal_buckets": len(bucket_offsets),
+        "horizontal_span_fraction": round(horizontal_span, 4),
     }
 
 
-def _segment_errors(segments: list[LineSegment]) -> tuple[float | None, float | None]:
+def _segment_errors(
+    segments: list[LineSegment], image_width: float | None = None
+) -> tuple[float | None, float | None]:
     """Return roll error and total vertical error for quality validation."""
     if not segments:
         return None, None
-    offsets = [segment.offset_from_vertical_deg for segment in segments]
-    weights = [segment.length for segment in segments]
-    roll_error = abs(weighted_median(offsets, weights))
-    total_weight = sum(weights)
-    vertical_error = sum(abs(offset) * weight for offset, weight in zip(offsets, weights)) / total_weight
+    if image_width is None:
+        image_width = max(max(segment.p1[0], segment.p2[0]) for segment in segments)
+    image_width = max(float(image_width), 1.0)
+    roll_error = abs(estimate_roll(segments, 90.0, image_width)[0])
+
+    buckets: list[list[LineSegment]] = [[] for _ in range(8)]
+    for segment in segments:
+        midpoint_x = (segment.p1[0] + segment.p2[0]) / 2.0
+        bucket_index = min(7, max(0, int(midpoint_x / image_width * 8)))
+        buckets[bucket_index].append(segment)
+    bucket_errors: list[float] = []
+    bucket_support: list[float] = []
+    for bucket in buckets:
+        if not bucket:
+            continue
+        support = sum(segment.length for segment in bucket)
+        bucket_errors.append(
+            sum(abs(segment.offset_from_vertical_deg) * segment.length for segment in bucket)
+            / support
+        )
+        bucket_support.append(support)
+    support_cap = float(np.median(bucket_support))
+    balanced_weights = [min(support, support_cap) for support in bucket_support]
+    vertical_error = sum(
+        error * weight for error, weight in zip(bucket_errors, balanced_weights)
+    ) / sum(balanced_weights)
     return roll_error, vertical_error
 
 
@@ -170,7 +242,7 @@ def _measure_output_errors(
         max_line_gap,
         vertical_tolerance_deg=25.0,
     )
-    roll_error, vertical_error = _segment_errors(segments)
+    roll_error, vertical_error = _segment_errors(segments, analysis.shape[1])
     return roll_error, vertical_error, len(segments)
 
 
@@ -328,7 +400,10 @@ def _warp_and_crop(
     )
 
     if crop_mode == "keep_all":
-        return warped, 0.0, {"uncropped_dimensions": [output_width, output_height]}
+        return warped, 0.0, {
+            "uncropped_dimensions": [output_width, output_height],
+            "effective_homography": matrix.tolist(),
+        }
 
     # Build a low-resolution validity mask, avoiding assumptions about whether
     # real pixels at the edge are black or dark.
@@ -357,9 +432,14 @@ def _warp_and_crop(
     full_x1 = min(output_width, max(full_x0 + 1, math.floor(x1 * inverse_scale) - 1))
     full_y1 = min(output_height, max(full_y0 + 1, math.floor(y1 * inverse_scale) - 1))
     cropped = warped[full_y0:full_y1, full_x0:full_x1]
+    crop_translation = np.array(
+        [[1.0, 0.0, -full_x0], [0.0, 1.0, -full_y0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
     return cropped, crop_fraction, {
         "uncropped_dimensions": [output_width, output_height],
         "crop_box": [full_x0, full_y0, full_x1, full_y1],
+        "effective_homography": (crop_translation @ matrix).tolist(),
     }
 
 
@@ -374,7 +454,7 @@ def auto_straighten_verticals(
     max_correction_deg: float = 5.0,
     mode: CorrectionMode = "auto",
     crop_mode: CropMode = "crop",
-    perspective_strength: float = 1.0,
+    perspective_strength: float = 0.5,
     minimum_confidence: float = 0.45,
     max_perspective_ratio: float = 0.28,
     max_crop_fraction: float = 0.18,
@@ -398,15 +478,30 @@ def auto_straighten_verticals(
         vertical_tolerance_deg=max(15.0, max_correction_deg + 8.0),
     )
     detected_correction_angle, level_confidence, level_debug = estimate_roll(
-        initial_segments, max_correction_deg
+        initial_segments, max_correction_deg, detection_width
     )
     correction_angle = detected_correction_angle
-    large_rotation_needs_more_evidence = abs(correction_angle) > 3.0 and level_confidence < 0.65
-    if level_confidence < minimum_confidence or large_rotation_needs_more_evidence:
+    strong_spatial_evidence = (
+        level_debug.get("occupied_horizontal_buckets", 0) >= 4
+        and level_debug.get("angle_mad_deg", 99.0) <= 1.0
+    )
+    moderate_rotation_needs_more_evidence = abs(correction_angle) > 2.25 and (
+        level_confidence < 0.72
+        or level_debug.get("occupied_horizontal_buckets", 0) < 4
+        or level_debug.get("angle_mad_deg", 99.0) > 1.5
+    )
+    large_rotation_needs_more_evidence = abs(correction_angle) > 2.75 and (
+        level_confidence < 0.72 or not strong_spatial_evidence
+    )
+    if (
+        level_confidence < minimum_confidence
+        or moderate_rotation_needs_more_evidence
+        or large_rotation_needs_more_evidence
+    ):
         reasons = []
         if level_confidence < minimum_confidence:
             reasons.append("low confidence")
-        if large_rotation_needs_more_evidence:
+        if moderate_rotation_needs_more_evidence or large_rotation_needs_more_evidence:
             reasons.append("large rotation lacks enough line agreement")
         warnings.append("Leveling skipped: " + ", ".join(reasons))
         correction_angle = 0.0
@@ -482,8 +577,8 @@ def auto_straighten_verticals(
     else:
         corrected, crop_fraction, warp_debug = _warp_and_crop(original_bgr, combined, crop_mode)
 
-    initial_roll_error, initial_vertical_error = _segment_errors(initial_segments)
-    leveled_roll_error, leveled_vertical_error = _segment_errors(leveled_segments)
+    initial_roll_error, initial_vertical_error = _segment_errors(initial_segments, detection_width)
+    leveled_roll_error, leveled_vertical_error = _segment_errors(leveled_segments, detection_width)
     validation_debug: dict = {
         "initial_roll_error_deg": round(initial_roll_error, 4) if initial_roll_error is not None else None,
         "initial_vertical_error_deg": round(initial_vertical_error, 4) if initial_vertical_error is not None else None,
@@ -513,10 +608,13 @@ def auto_straighten_verticals(
             }
         )
         required_improvement = max(0.12, (leveled_vertical_error or 0.0) * 0.05)
+        initial_required_improvement = max(0.12, (initial_vertical_error or 0.0) * 0.05)
         perspective_improved = (
             leveled_vertical_error is not None
+            and initial_vertical_error is not None
             and output_vertical_error is not None
             and output_vertical_error <= leveled_vertical_error - required_improvement
+            and output_vertical_error <= initial_vertical_error - initial_required_improvement
         )
         if not perspective_improved:
             warnings.append("Perspective skipped because output line geometry did not improve")

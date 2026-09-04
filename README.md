@@ -20,7 +20,7 @@ The service transforms existing pixels only. It does not generate or replace pro
   "image_url": "https://example.com/input.jpg",
   "mode": "auto",
   "crop_mode": "crop",
-  "perspective_strength": 1.0,
+  "perspective_strength": 0.5,
   "minimum_confidence": 0.45,
   "max_crop_fraction": 0.18,
   "save_debug": true
@@ -40,7 +40,9 @@ Crop modes:
 
 The response reports the applied mode, confidence, crop loss, correction angle, warnings, and output URL. Keep the original image in storage so every correction remains reversible.
 
-Automatic leveling defaults to a five-degree ceiling. Corrections over three degrees require stronger line agreement, and any operation that exceeds the allowed crop loss returns the untouched original.
+Automatic leveling defaults to a five-degree ceiling. Corrections over 2.25 degrees require stronger spatial evidence, with an additional consistency check over 2.75 degrees. Any operation that exceeds the allowed crop loss returns the untouched original. Repeated lines are balanced by their horizontal position so one cabinet, shelf, or stack of panels cannot rotate the entire room.
+
+Perspective correction defaults to half strength. The setting was calibrated against manually corrected real-estate photos to avoid the over-stretched look produced by full geometric rectification; callers can still request any strength from `0.0` through `1.0`.
 
 Every candidate correction is analyzed a second time after transformation. If the measured line geometry did not improve, the service falls back from perspective to level-only correction, or from level-only correction to the untouched original.
 
@@ -66,3 +68,11 @@ The evaluation tool creates baseline/corrected previews, contact sheets, an inte
 ```bash
 python tools/evaluate_batch.py /path/to/photos evaluation/my-batch
 ```
+
+To compare a batch with manually corrected reference files that have matching names:
+
+```bash
+python tools/compare_ground_truth.py /path/to/originals /path/to/manual-corrections evaluation/ground-truth
+```
+
+This produces three-way previews, contact sheets, registration measurements, and a JSON/CSV report. Existing feature registrations are reused on subsequent runs unless `--remeasure-registration` is supplied.

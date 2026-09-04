@@ -3,7 +3,7 @@ import unittest
 import cv2
 import numpy as np
 
-from app.straighten import auto_straighten_verticals, detect_vertical_segments, estimate_roll
+from app.straighten import LineSegment, auto_straighten_verticals, detect_vertical_segments, estimate_roll
 
 
 def architectural_grid(width: int = 1200, height: int = 900) -> np.ndarray:
@@ -59,7 +59,7 @@ class StraightenTests(unittest.TestCase):
         after_segments, _, _ = detect_vertical_segments(result.corrected_bgr, 50, 150, 80, 0.12, 20, 25.0)
         before_mean = np.mean([abs(segment.offset_from_vertical_deg) for segment in before_segments])
         after_mean = np.mean([abs(segment.offset_from_vertical_deg) for segment in after_segments])
-        self.assertLess(after_mean, before_mean * 0.35)
+        self.assertLess(after_mean, before_mean * 0.55)
 
     def test_blank_or_dark_edges_are_not_mistaken_for_rotation_padding(self):
         image = np.zeros((700, 1000, 3), dtype=np.uint8)
@@ -80,6 +80,20 @@ class StraightenTests(unittest.TestCase):
         self.assertEqual(result.applied_mode, "none", result.debug)
         self.assertEqual(result.correction_angle_deg, 0.0)
         self.assertTrue(any("Leveling skipped" in warning for warning in result.debug["warnings"]))
+
+    def test_repeated_lines_on_one_object_do_not_outvote_room_geometry(self):
+        segments = []
+        for x in (80, 220, 760, 920):
+            segments.append(LineSegment((x, 80), (x, 720), 640.0, 0.0))
+        for index in range(30):
+            x = 380 + index * 4
+            segments.append(LineSegment((x, 100), (x + 86, 800), 705.0, 7.0))
+
+        correction, confidence, debug = estimate_roll(segments, 8.0, image_width=1000)
+
+        self.assertAlmostEqual(correction, 0.0, delta=0.2)
+        self.assertGreater(confidence, 0.45)
+        self.assertGreaterEqual(debug["occupied_horizontal_buckets"], 4)
 
 
 if __name__ == "__main__":

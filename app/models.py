@@ -9,7 +9,7 @@ class StraightenRequest(BaseModel):
     crop_mode: Literal["crop", "keep_all"] = "crop"
     max_dimension: int = Field(default=2400, ge=500, le=6000)
     max_correction_deg: float = Field(default=5.0, ge=0.1, le=20.0)
-    perspective_strength: float = Field(default=1.0, ge=0.0, le=1.0)
+    perspective_strength: float = Field(default=0.5, ge=0.0, le=1.0)
     minimum_confidence: float = Field(default=0.45, ge=0.0, le=1.0)
     max_perspective_ratio: float = Field(default=0.28, ge=0.01, le=0.75)
     max_crop_fraction: float = Field(default=0.18, ge=0.0, le=0.75)
