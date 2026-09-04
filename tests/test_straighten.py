@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from app.straighten import LineSegment, auto_straighten_verticals, detect_vertical_segments, estimate_roll
+from tools.compare_ground_truth import normalized_match_key
 
 
 def architectural_grid(width: int = 1200, height: int = 900) -> np.ndarray:
@@ -16,6 +17,18 @@ def architectural_grid(width: int = 1200, height: int = 900) -> np.ndarray:
 
 
 class StraightenTests(unittest.TestCase):
+    def test_manual_export_filename_matches_original(self):
+        self.assertEqual(
+            normalized_match_key("Manual-correct-N 1163 Michigan Ave 001-.jpg"),
+            normalized_match_key("N 1163 Michigan Ave 001.jpg"),
+        )
+
+    def test_manual_export_filename_normalization_is_case_insensitive(self):
+        self.assertEqual(
+            normalized_match_key("MANUALLY-CORRECTED-P1269747-.JPG"),
+            normalized_match_key("P1269747.jpg"),
+        )
+
     def test_detection_resize_does_not_reduce_delivery_resolution(self):
         image = architectural_grid(1800, 1200)
         matrix = cv2.getRotationMatrix2D((900, 600), 3.0, 1.0)

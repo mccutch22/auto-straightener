@@ -3,6 +3,7 @@ import csv
 import html
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +20,39 @@ from tools.evaluate_batch import fit_tile, resize_to_limit, vertical_error, writ
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
+
+
+def normalized_match_key(path_or_name: Path | str) -> str:
+    """Normalize the filename wrappers used by manual-correction exports."""
+    stem = Path(path_or_name).stem.casefold().strip()
+    prefixes = (
+        "manual-correct-",
+        "manual-corrected-",
+        "manually-correct-",
+        "manually-corrected-",
+        "manual correct ",
+        "manual corrected ",
+        "manually correct ",
+        "manually corrected ",
+    )
+    for prefix in prefixes:
+        if stem.startswith(prefix):
+            stem = stem[len(prefix) :]
+            break
+    stem = re.sub(r"[-_\s]+$", "", stem)
+    return re.sub(r"\s+", " ", stem)
+
+
+def index_images(folder: Path) -> dict[str, Path]:
+    indexed: dict[str, Path] = {}
+    for path in folder.iterdir():
+        if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        key = normalized_match_key(path)
+        if key in indexed:
+            raise ValueError(f"Duplicate normalized filename in {folder}: {path.name}")
+        indexed[key] = path
+    return indexed
 
 
 def _analysis_copy(image: np.ndarray, max_dimension: int = 1400) -> tuple[np.ndarray, float]:
@@ -169,10 +203,13 @@ def main() -> None:
     prior_manifest = args.output_dir / "manifest.json"
     if prior_manifest.exists() and not args.remeasure_registration:
         prior_payload = json.loads(prior_manifest.read_text(encoding="utf-8"))
-        prior_records = {record["name"].casefold(): record for record in prior_payload.get("images", [])}
+        prior_records = {
+            normalized_match_key(record["name"]): record
+            for record in prior_payload.get("images", [])
+        }
 
-    originals = {path.name.casefold(): path for path in args.original_dir.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS}
-    manuals = {path.name.casefold(): path for path in args.manual_dir.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS}
+    originals = index_images(args.original_dir)
+    manuals = index_images(args.manual_dir)
     common = sorted(originals.keys() & manuals.keys())
     if not common:
         raise SystemExit("No matching image filenames found")
@@ -264,7 +301,11 @@ def main() -> None:
         for record in usable
     ]
     summary = {
+        "original_files": len(originals),
+        "manual_files": len(manuals),
         "matched_files": len(common),
+        "unmatched_original_files": len(originals.keys() - manuals.keys()),
+        "unmatched_manual_files": len(manuals.keys() - originals.keys()),
         "evaluated_files": len(records),
         "registered_files": len(usable),
         "manual_rotation_median_abs_deg": round(float(np.median([abs(r["manual_rotation_deg"]) for r in usable])), 4),
@@ -279,6 +320,19 @@ def main() -> None:
     }
     with (args.output_dir / "manifest.json").open("w", encoding="utf-8") as handle:
         json.dump({"summary": summary, "images": records}, handle, indent=2)
+    with (args.output_dir / "unmatched.json").open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "originals_without_manual_reference": [
+                    originals[key].name for key in sorted(originals.keys() - manuals.keys())
+                ],
+                "manual_references_without_original": [
+                    manuals[key].name for key in sorted(manuals.keys() - originals.keys())
+                ],
+            },
+            handle,
+            indent=2,
+        )
     fieldnames = sorted({key for record in records for key in record if not key.endswith("_preview")})
     with (args.output_dir / "measurements.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
