@@ -139,6 +139,41 @@ def estimate_roll(segments: list[LineSegment], max_correction_deg: float) -> tup
     }
 
 
+def _segment_errors(segments: list[LineSegment]) -> tuple[float | None, float | None]:
+    """Return roll error and total vertical error for quality validation."""
+    if not segments:
+        return None, None
+    offsets = [segment.offset_from_vertical_deg for segment in segments]
+    weights = [segment.length for segment in segments]
+    roll_error = abs(weighted_median(offsets, weights))
+    total_weight = sum(weights)
+    vertical_error = sum(abs(offset) * weight for offset, weight in zip(offsets, weights)) / total_weight
+    return roll_error, vertical_error
+
+
+def _measure_output_errors(
+    image_bgr: np.ndarray,
+    max_dimension: int,
+    canny_threshold1: int,
+    canny_threshold2: int,
+    hough_threshold: int,
+    min_line_length_ratio: float,
+    max_line_gap: int,
+) -> tuple[float | None, float | None, int]:
+    analysis, _ = resize_for_detection(image_bgr, max_dimension)
+    segments, _, _ = detect_vertical_segments(
+        analysis,
+        canny_threshold1,
+        canny_threshold2,
+        hough_threshold,
+        min_line_length_ratio,
+        max_line_gap,
+        vertical_tolerance_deg=25.0,
+    )
+    roll_error, vertical_error = _segment_errors(segments)
+    return roll_error, vertical_error, len(segments)
+
+
 def _rotation_homography(width: int, height: int, angle_deg: float) -> np.ndarray:
     matrix = cv2.getRotationMatrix2D((width / 2.0, height / 2.0), angle_deg, 1.0)
     return np.vstack([matrix, [0.0, 0.0, 1.0]]).astype(np.float64)
@@ -375,6 +410,8 @@ def auto_straighten_verticals(
             reasons.append("large rotation lacks enough line agreement")
         warnings.append("Leveling skipped: " + ", ".join(reasons))
         correction_angle = 0.0
+    elif abs(correction_angle) < 0.15:
+        correction_angle = 0.0
 
     detect_rotation = _rotation_homography(detection_width, detection_height, correction_angle)
     leveled_detection = cv2.warpPerspective(
@@ -445,6 +482,53 @@ def auto_straighten_verticals(
     else:
         corrected, crop_fraction, warp_debug = _warp_and_crop(original_bgr, combined, crop_mode)
 
+    initial_roll_error, initial_vertical_error = _segment_errors(initial_segments)
+    leveled_roll_error, leveled_vertical_error = _segment_errors(leveled_segments)
+    validation_debug: dict = {
+        "initial_roll_error_deg": round(initial_roll_error, 4) if initial_roll_error is not None else None,
+        "initial_vertical_error_deg": round(initial_vertical_error, 4) if initial_vertical_error is not None else None,
+        "leveled_roll_error_deg": round(leveled_roll_error, 4) if leveled_roll_error is not None else None,
+        "leveled_vertical_error_deg": round(leveled_vertical_error, 4) if leveled_vertical_error is not None else None,
+    }
+
+    if perspective_applied:
+        output_roll_error, output_vertical_error, output_line_count = _measure_output_errors(
+            corrected,
+            max_dimension,
+            canny_threshold1,
+            canny_threshold2,
+            hough_threshold,
+            min_line_length_ratio,
+            max_line_gap,
+        )
+        validation_debug.update(
+            {
+                "candidate_output_roll_error_deg": round(output_roll_error, 4)
+                if output_roll_error is not None
+                else None,
+                "candidate_output_vertical_error_deg": round(output_vertical_error, 4)
+                if output_vertical_error is not None
+                else None,
+                "candidate_output_vertical_lines": output_line_count,
+            }
+        )
+        required_improvement = max(0.12, (leveled_vertical_error or 0.0) * 0.05)
+        perspective_improved = (
+            leveled_vertical_error is not None
+            and output_vertical_error is not None
+            and output_vertical_error <= leveled_vertical_error - required_improvement
+        )
+        if not perspective_improved:
+            warnings.append("Perspective skipped because output line geometry did not improve")
+            perspective_applied = False
+            combined = original_rotation
+            if abs(correction_angle) < 0.01:
+                corrected = original_bgr.copy()
+                crop_fraction = 0.0
+                warp_debug = {"uncropped_dimensions": [original_width, original_height]}
+            else:
+                corrected, crop_fraction, warp_debug = _warp_and_crop(original_bgr, combined, crop_mode)
+
     # An aggressive crop is worse than a slightly converging room. Fall back to
     # level-only correction and report why.
     if perspective_applied and crop_mode == "crop" and crop_fraction > max_crop_fraction:
@@ -459,6 +543,40 @@ def auto_straighten_verticals(
             warp_debug = {"uncropped_dimensions": [original_width, original_height]}
         else:
             corrected, crop_fraction, warp_debug = _warp_and_crop(original_bgr, combined, crop_mode)
+
+    if not perspective_applied and abs(correction_angle) >= 0.01:
+        output_roll_error, output_vertical_error, output_line_count = _measure_output_errors(
+            corrected,
+            max_dimension,
+            canny_threshold1,
+            canny_threshold2,
+            hough_threshold,
+            min_line_length_ratio,
+            max_line_gap,
+        )
+        validation_debug.update(
+            {
+                "level_output_roll_error_deg": round(output_roll_error, 4)
+                if output_roll_error is not None
+                else None,
+                "level_output_vertical_error_deg": round(output_vertical_error, 4)
+                if output_vertical_error is not None
+                else None,
+                "level_output_vertical_lines": output_line_count,
+            }
+        )
+        required_improvement = max(0.08, (initial_roll_error or 0.0) * 0.25)
+        leveling_improved = (
+            initial_roll_error is not None
+            and output_roll_error is not None
+            and output_roll_error <= initial_roll_error - required_improvement
+        )
+        if not leveling_improved:
+            warnings.append("Leveling skipped because output line geometry did not improve")
+            corrected = original_bgr.copy()
+            correction_angle = 0.0
+            crop_fraction = 0.0
+            warp_debug = {"uncropped_dimensions": [original_width, original_height]}
 
     if crop_mode == "crop" and crop_fraction > max_crop_fraction:
         warnings.append(
@@ -490,6 +608,7 @@ def auto_straighten_verticals(
         },
         "output_dimensions": [corrected.shape[1], corrected.shape[0]],
         "crop_fraction": round(crop_fraction, 6),
+        "validation": validation_debug,
         "warp": warp_debug,
         "warnings": warnings,
     }

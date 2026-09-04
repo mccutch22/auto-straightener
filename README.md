@@ -42,6 +42,8 @@ The response reports the applied mode, confidence, crop loss, correction angle, 
 
 Automatic leveling defaults to a five-degree ceiling. Corrections over three degrees require stronger line agreement, and any operation that exceeds the allowed crop loss returns the untouched original.
 
+Every candidate correction is analyzed a second time after transformation. If the measured line geometry did not improve, the service falls back from perspective to level-only correction, or from level-only correction to the untouched original.
+
 ## Run locally
 
 ```bash
@@ -55,4 +57,12 @@ Set `S3_BUCKET`, `AWS_REGION`, and optionally `S3_PUBLIC_BASE_URL`. Set `API_TOK
 
 ```bash
 python -m unittest discover -s tests -v
+```
+
+## Evaluate a photo batch
+
+The evaluation tool creates baseline/corrected previews, contact sheets, an interactive HTML review gallery, and a JSON metrics manifest without overwriting source photos:
+
+```bash
+python tools/evaluate_batch.py /path/to/photos evaluation/my-batch
 ```
