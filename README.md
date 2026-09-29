@@ -13,6 +13,34 @@ The service transforms existing pixels only. It does not generate or replace pro
 
 ## API
 
+### PhotoDash integration (recommended)
+
+`POST /v1/straighten`, `Authorization: Bearer <API_TOKEN>`, raw JPEG/PNG/WebP request body.
+Authentication is required, including when the worker is misconfigured. The API accepts
+up to 32 MB / 24 megapixels, one image at a time. It normalizes EXIF orientation and ICC
+color to sRGB. It does not download user-supplied URLs or need AWS credentials.
+
+The JSON response includes `outcome` (`corrected` or `unchanged`), `mode`, `rotation`,
+`confidence`, `cropFraction`, dimensions, warnings, geometry and algorithm version.
+Corrected responses also include `imageBase64` (JPEG quality 96); unchanged responses
+contain no image, so PhotoDash keeps the original bytes. Concurrent requests receive 429.
+PhotoDash saves outputs privately, owns the durable queue, and requires review before
+replacing a gallery image. Closing its review window pauses the remaining queue.
+
+The source aspect ratio is preserved. Crops include interpolation margins and an inverse
+geometry check; they contain only source pixels. No replicated or invented scenery is
+delivered by this endpoint. Detection runs at a maximum 1400px; the final warp uses the
+full-resolution original. Corrections that discard more than 18% of valid area are skipped.
+
+Render: Docker runtime, one worker, `/health` health check. Set `API_TOKEN`; the Dockerfile
+uses Render's `PORT`. PhotoDash needs `STRAIGHTENER_URL` and the matching
+`STRAIGHTENER_API_TOKEN`. Keep both tokens out of source control. No GPU is needed.
+
+### Legacy URL API
+
+The following endpoint is disabled by default. Explicit `ENABLE_LEGACY_URL_API=true`
+opts into its original URL/S3 behavior; it is not used by PhotoDash.
+
 `POST /straighten`
 
 ```json
@@ -53,7 +81,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 10000
 ```
 
-Set `S3_BUCKET`, `AWS_REGION`, and optionally `S3_PUBLIC_BASE_URL`. Set `API_TOKEN` to require a bearer token.
+Set `API_TOKEN`. Only the optional legacy API additionally needs `S3_BUCKET`, `AWS_REGION`, and optionally `S3_PUBLIC_BASE_URL`.
 
 ## Tests
 

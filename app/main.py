@@ -1,4 +1,5 @@
 import os
+import secrets
 from io import BytesIO
 
 import cv2
@@ -7,26 +8,27 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 
 from .models import StraightenRequest, StraightenResponse
-from .storage import make_output_key, upload_bytes
 from .straighten import auto_straighten_verticals
 
 
 API_TOKEN = os.getenv("API_TOKEN")
 
 app = FastAPI(title="Auto Straightener API")
+from .photodash import router, VERSION
+app.include_router(router)
 
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "version": VERSION, "configured": bool(API_TOKEN)}
 
 
 def require_auth(authorization: str | None):
     if not API_TOKEN:
-        return
+        raise HTTPException(status_code=503, detail="Worker authentication is not configured")
 
     expected = f"Bearer {API_TOKEN}"
-    if authorization != expected:
+    if not secrets.compare_digest(authorization or "", expected):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -57,6 +59,9 @@ def straighten(
     authorization: str | None = Header(default=None),
 ):
     require_auth(authorization)
+    if os.getenv("ENABLE_LEGACY_URL_API") != "true":
+        raise HTTPException(410, "Use the authenticated binary /v1/straighten endpoint")
+    from .storage import make_output_key, upload_bytes
 
     try:
         image_bytes = download_image(str(payload.image_url))

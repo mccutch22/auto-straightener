@@ -1,0 +1,66 @@
+"""Private binary API: no remote URL downloads and no storage credentials required."""
+import base64
+import json
+import threading
+from io import BytesIO
+
+import cv2
+import numpy as np
+from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
+from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+
+from .straighten import auto_straighten_verticals
+
+router = APIRouter()
+busy = threading.Lock()
+VERSION = "photodash-verticals-1"
+MAX_BYTES = 32 * 1024 * 1024
+MAX_PIXELS = 24_000_000
+cv2.setNumThreads(1)
+
+
+def process(data: bytes):
+    try:
+        with Image.open(BytesIO(data)) as source:
+            # iPhone JPEGs can be MPO containers with an auxiliary HDR gain map.
+            # Process the primary photograph, never the auxiliary image.
+            if source.format not in ("JPEG", "MPO", "PNG", "WEBP") or source.width * source.height > MAX_PIXELS or (source.format != "MPO" and getattr(source, "n_frames", 1) != 1):
+                raise ValueError("Use a single JPEG, PNG or WebP up to 24 megapixels")
+            source.seek(0)
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            if source.info.get("icc_profile"):
+                image = ImageCms.profileToProfile(image, ImageCms.ImageCmsProfile(BytesIO(source.info["icc_profile"])), ImageCms.createProfile("sRGB"), outputMode="RGB")
+            original = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            image.close()
+    except (ValueError, OSError, UnidentifiedImageError, Image.DecompressionBombError) as error:
+        raise HTTPException(422, "Unsupported or damaged photo") from error
+    result = auto_straighten_verticals(original, max_dimension=1400, crop_mode="crop", perspective_strength=0.5)
+    metadata = dict(version=VERSION, outcome="corrected" if result.applied_mode != "none" else "unchanged",
+                    mode=result.applied_mode, rotation=result.correction_angle_deg, confidence=result.confidence,
+                    cropFraction=result.crop_fraction, width=result.corrected_bgr.shape[1], height=result.corrected_bgr.shape[0],
+                    warnings=result.debug.get("warnings", []), geometry=result.debug)
+    if result.applied_mode != "none":
+        ok, encoded = cv2.imencode(".jpg", result.corrected_bgr, [cv2.IMWRITE_JPEG_QUALITY, 96])
+        if not ok:
+            raise RuntimeError("Could not encode correction")
+        metadata["imageBase64"] = base64.b64encode(encoded).decode("ascii")
+    json.dumps(metadata, allow_nan=False)
+    return metadata
+
+
+@router.post("/v1/straighten")
+async def straighten_binary(request: Request, authorization: str | None = Header(default=None)):
+    from .main import require_auth
+    require_auth(authorization)
+    if not busy.acquire(blocking=False):
+        raise HTTPException(429, "Worker is busy; retry shortly", headers={"Retry-After": "5"})
+    try:
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_BYTES:
+                raise HTTPException(413, "Photo must be smaller than 32 MB")
+        return await run_in_threadpool(process, bytes(data))
+    finally:
+        busy.release()

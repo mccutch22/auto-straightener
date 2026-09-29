@@ -99,7 +99,7 @@ def detect_vertical_segments(
     if lines is None:
         return segments, total_lines, debug_img
 
-    for raw_line in lines[:, 0]:
+    for raw_line in lines.reshape(-1, 4):
         x1, y1, x2, y2 = (float(value) for value in raw_line)
         total_lines += 1
         dx, dy = x2 - x1, y2 - y1
@@ -421,6 +421,9 @@ def _warp_and_crop(
         borderValue=0,
     )
     binary_mask = mask >= 250
+    # The interpolation footprint must stay inside actual source pixels.
+    margin = max(2, math.ceil(5 * mask_scale))
+    binary_mask = cv2.erode(binary_mask.astype(np.uint8), np.ones((margin * 2 + 1, margin * 2 + 1), np.uint8), borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool)
     x0, y0, x1, y1 = _largest_rectangle_in_mask(binary_mask)
     valid_area = int(binary_mask.sum())
     retained_area = max(0, x1 - x0) * max(0, y1 - y0)
@@ -431,6 +434,24 @@ def _warp_and_crop(
     full_y0 = min(output_height - 1, max(0, math.ceil(y0 * inverse_scale) + 1))
     full_x1 = min(output_width, max(full_x0 + 1, math.floor(x1 * inverse_scale) - 1))
     full_y1 = min(output_height, max(full_y0 + 1, math.floor(y1 * inverse_scale) - 1))
+    # Fit the source aspect inside the all-valid rectangle. No stretched edges.
+    divisor = math.gcd(width, height)
+    unit_w, unit_h = width // divisor, height // divisor
+    multiple = min((full_x1 - full_x0) // unit_w, (full_y1 - full_y0) // unit_h)
+    if multiple < 1:
+        raise ValueError("No safe crop with the source aspect ratio")
+    crop_w, crop_h = multiple * unit_w, multiple * unit_h
+    full_x0 += (full_x1 - full_x0 - crop_w) // 2
+    full_y0 += (full_y1 - full_y0 - crop_h) // 2
+    full_x1, full_y1 = full_x0 + crop_w, full_y0 + crop_h
+    # Verify the final rectangle analytically, including the Lanczos footprint.
+    inverse = np.linalg.inv(matrix)
+    crop_corners = np.array([[[full_x0, full_y0], [full_x1-1, full_y0], [full_x1-1, full_y1-1], [full_x0, full_y1-1]]], np.float64)
+    source_corners = cv2.perspectiveTransform(crop_corners, inverse)[0]
+    if (source_corners[:, 0].min() < 4 or source_corners[:, 1].min() < 4
+            or source_corners[:, 0].max() > width-5 or source_corners[:, 1].max() > height-5):
+        raise ValueError("Correction has insufficient safe edge margin")
+    crop_fraction = float(np.clip(1.0 - crop_w * crop_h / max(valid_area / (mask_scale ** 2), 1), 0.0, 1.0))
     cropped = warped[full_y0:full_y1, full_x0:full_x1]
     crop_translation = np.array(
         [[1.0, 0.0, -full_x0], [0.0, 1.0, -full_y0], [0.0, 0.0, 1.0]],
@@ -548,7 +569,7 @@ def auto_straighten_verticals(
             confident_enough = perspective_confidence >= minimum_confidence
 
             if confident_enough and correction_is_meaningful and correction_is_safe and centered_enough:
-                vp_original = vanishing_point / detection_scale
+                vp_original = vanishing_point * np.array([original_width / detection_width, original_height / detection_height])
                 perspective = _vertical_rectification_homography(
                     original_width,
                     original_height,
