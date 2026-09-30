@@ -24,13 +24,20 @@ The JSON response includes `outcome` (`corrected` or `unchanged`), `mode`, `rota
 `confidence`, `cropFraction`, dimensions, warnings, geometry and algorithm version.
 Corrected responses also include `imageBase64` (JPEG quality 96); unchanged responses
 contain no image, so PhotoDash keeps the original bytes. Concurrent requests receive 429.
-PhotoDash saves outputs privately, owns the durable queue, and requires review before
-replacing a gallery image. Closing its review window pauses the remaining queue.
+PhotoDash saves outputs privately and owns the durable queue. Manual corrections have
+a review step; new GPT bracket results are straightened automatically after quality
+review. Esoft results bypass automatic straightening. Saved original and corrected
+versions can be switched without another processing request.
 
 The source aspect ratio is preserved. Crops include interpolation margins and an inverse
 geometry check; they contain only source pixels. No replicated or invented scenery is
 delivered by this endpoint. Detection runs at a maximum 1400px; the final warp uses the
-full-resolution original. Corrections that discard more than 18% of valid area are skipped.
+full-resolution original. The PhotoDash v2 handheld preset uses 0.65 perspective
+strength, 0.315 minimum confidence, 0.364 maximum perspective ratio, and 0.234 maximum
+crop fraction. These are 30% more aggressive than v1 (confidence is reduced by 30%).
+Corrections that discard more than 23.4% of valid area are skipped. Large-rotation
+evidence checks and post-transform improvement checks are unchanged. Legacy API
+and direct algorithm defaults remain unchanged.
 
 Render: Docker runtime, one worker, `/health` health check. Set `API_TOKEN`; the Dockerfile
 uses Render's `PORT`. PhotoDash needs `STRAIGHTENER_URL` and the matching

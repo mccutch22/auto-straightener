@@ -14,6 +14,30 @@ from test_straighten import architectural_grid
 
 
 class PhotoDashTests(unittest.TestCase):
+    def test_handheld_preset_corrects_stronger_skew_in_both_directions(self):
+        for sign in [-1, 1]:
+            with self.subTest(sign=sign):
+                image = np.full((900, 1200, 3), 240, np.uint8)
+                for x in range(120, 1200, 120):
+                    cv2.line(image, (round(600+(x-600)*(1-sign*.13)), 40),
+                             (round(600+(x-600)*(1+sign*.13)), 860), (20,20,20), 7)
+                baseline = auto_straighten_verticals(image, max_dimension=1400)
+                self.assertEqual(baseline.applied_mode, 'none')
+                result = process(cv2.imencode('.png', image)[1].tobytes())
+                self.assertEqual(result['mode'], 'perspective', result['warnings'])
+                validation = result['geometry']['validation']
+                self.assertLess(validation['candidate_output_vertical_error_deg'],
+                                validation['initial_vertical_error_deg'])
+                self.assertLessEqual(result['cropFraction'], .234)
+                self.assertEqual(result['width'] * 900, result['height'] * 1200)
+
+    def test_handheld_preset_preserves_ambiguous_single_line(self):
+        image = np.full((800, 800, 3), 230, np.uint8)
+        cv2.line(image, (360, 60), (430, 740), (20,20,20), 6)
+        result = process(cv2.imencode('.png', image)[1].tobytes())
+        self.assertEqual(result['outcome'], 'unchanged', result['warnings'])
+        self.assertNotIn('imageBase64', result)
+
     def test_binary_http_auth_busy_and_success(self):
         client=TestClient(app);buffer=BytesIO();Image.new('RGB',(800,600),'white').save(buffer,format='JPEG')
         with patch('app.main.API_TOKEN','secret'):
