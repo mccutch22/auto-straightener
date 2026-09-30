@@ -10,7 +10,7 @@ from app.manual import adjust, manual_geometry
 
 class ManualTests(unittest.TestCase):
     def test_manual_bypasses_line_detection_and_never_exposes_padding(self):
-        for width,height in [(1200,900),(900,1200)]:
+        for width,height in [(1200,900),(900,1200),(1199,897)]:
             source=np.full((height,width,3),255,np.uint8)
             for rotation,vertical,horizontal in [(0,60,0),(0,-60,0),(3,20,-30),(-15,-100,100),(15,100,-100)]:
                 with self.subTest(size=(width,height),values=(rotation,vertical,horizontal)):
@@ -18,7 +18,7 @@ class ManualTests(unittest.TestCase):
                     self.assertEqual(result.applied_mode,'manual')
                     self.assertEqual(result.corrected_bgr.min(),255)
                     h,w=result.corrected_bgr.shape[:2]
-                    self.assertEqual(w*height,h*width)
+                    self.assertLess(abs(w*height-h*width),max(width,height))
                     self.assertLess(w,width)
                     matrix,_,_=manual_geometry(width,height,rotation,vertical,horizontal)
                     inv=np.linalg.inv(matrix)

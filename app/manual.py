@@ -33,12 +33,10 @@ def manual_geometry(width, height, rotation, vertical, horizontal):
         mid = (lo+hi)/2
         if safe(mid): lo = mid
         else: hi = mid
-    divisor = math.gcd(width,height)
-    uw, uh = width//divisor, height//divisor
-    n = math.floor(min(width*lo/uw,height*lo/uh))
-    if n < 1:
-        raise ValueError('No safe crop at the original aspect ratio')
-    w, h = n*uw, n*uh
+    # Pixel rounding supports arbitrary sizes, including prior automatic crops.
+    w, h = math.floor(width*lo), math.floor(height*lo)
+    if w < 1 or h < 1:
+        raise ValueError('No safe crop')
     left, top = (width-w)/2, (height-h)/2
     translation = np.array([[1,0,-left],[0,1,-top],[0,0,1]], dtype=np.float64)
     return translation @ matrix, w, h
