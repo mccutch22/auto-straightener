@@ -14,7 +14,7 @@ from .straighten import auto_straighten_verticals
 
 router = APIRouter()
 busy = threading.Lock()
-VERSION = "photodash-verticals-2"
+VERSION = "photodash-verticals-3"
 MAX_BYTES = 32 * 1024 * 1024
 MAX_PIXELS = 24_000_000
 cv2.setNumThreads(1)

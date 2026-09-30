@@ -188,67 +188,55 @@ def estimate_roll(
     }
 
 
-def _segment_errors(
-    segments: list[LineSegment], image_width: float | None = None
-) -> tuple[float | None, float | None]:
-    """Return roll error and total vertical error for quality validation."""
-    if not segments:
-        return None, None
-    if image_width is None:
-        image_width = max(max(segment.p1[0], segment.p2[0]) for segment in segments)
-    image_width = max(float(image_width), 1.0)
-    roll_error = abs(estimate_roll(segments, 90.0, image_width)[0])
-
-    buckets: list[list[LineSegment]] = [[] for _ in range(8)]
-    for segment in segments:
-        midpoint_x = (segment.p1[0] + segment.p2[0]) / 2.0
-        bucket_index = min(7, max(0, int(midpoint_x / image_width * 8)))
-        buckets[bucket_index].append(segment)
-    bucket_errors: list[float] = []
-    bucket_support: list[float] = []
-    for bucket in buckets:
-        if not bucket:
-            continue
-        support = sum(segment.length for segment in bucket)
-        bucket_errors.append(
-            sum(abs(segment.offset_from_vertical_deg) * segment.length for segment in bucket)
-            / support
-        )
-        bucket_support.append(support)
-    support_cap = float(np.median(bucket_support))
-    balanced_weights = [min(support, support_cap) for support in bucket_support]
-    vertical_error = sum(
-        error * weight for error, weight in zip(bucket_errors, balanced_weights)
-    ) / sum(balanced_weights)
-    return roll_error, vertical_error
-
-
-def _measure_output_errors(
-    image_bgr: np.ndarray,
-    max_dimension: int,
-    canny_threshold1: int,
-    canny_threshold2: int,
-    hough_threshold: int,
-    min_line_length_ratio: float,
-    max_line_gap: int,
-) -> tuple[float | None, float | None, int]:
-    analysis, _ = resize_for_detection(image_bgr, max_dimension)
-    segments, _, _ = detect_vertical_segments(
-        analysis,
-        canny_threshold1,
-        canny_threshold2,
-        hough_threshold,
-        min_line_length_ratio,
-        max_line_gap,
-        vertical_tolerance_deg=25.0,
-    )
-    roll_error, vertical_error = _segment_errors(segments, analysis.shape[1])
-    return roll_error, vertical_error, len(segments)
-
-
 def _rotation_homography(width: int, height: int, angle_deg: float) -> np.ndarray:
     matrix = cv2.getRotationMatrix2D((width / 2.0, height / 2.0), angle_deg, 1.0)
     return np.vstack([matrix, [0.0, 0.0, 1.0]]).astype(np.float64)
+
+
+def _transform_segments(segments: list[LineSegment], matrix: np.ndarray) -> list[LineSegment]:
+    """Track the same evidence through a correction instead of redetecting it."""
+    if not segments:
+        return []
+    points = np.array([[s.p1, s.p2] for s in segments], dtype=np.float64)
+    transformed = cv2.perspectiveTransform(points, matrix)
+    return [LineSegment(tuple(p[0]), tuple(p[1]), source.length,
+                        _angle_from_vertical(*(p[1] - p[0])))
+            for source, p in zip(segments, transformed)]
+
+
+def _tracked_errors(segments: list[LineSegment], matrix: np.ndarray, width: int,
+                    height: int, vanishing_point: np.ndarray | None = None):
+    """Compare fixed source lines/weights; cropping cannot improve the score.
+
+    For converging verticals, camera roll is the direction at the optical center,
+    not the median direction of whichever wall has more detected edges.
+    """
+    transformed = _transform_segments(segments, matrix)
+    if not transformed:
+        return None, None, 0
+    buckets = [[] for _ in range(8)]
+    for source, output in zip(segments, transformed):
+        x = (source.p1[0] + source.p2[0]) / 2
+        buckets[min(7, max(0, int(x / width * 8)))].append((source.length, output.offset_from_vertical_deg))
+    support, errors, offsets = [], [], []
+    for bucket in buckets:
+        if bucket:
+            weights, angles = zip(*bucket)
+            support.append(sum(weights))
+            errors.append(sum(w * abs(a) for w, a in bucket) / sum(weights))
+            offsets.append(weighted_median(list(angles), list(weights)))
+    weights = [min(s, float(np.median(support))) for s in support]
+    vertical_error = sum(e * w for e, w in zip(errors, weights)) / sum(weights)
+    roll_error = abs(weighted_median(offsets, weights))
+    if vanishing_point is not None:
+        center = np.array([width / 2, height / 2, 1.0])
+        point = np.r_[vanishing_point, 1.0]
+        # Homogeneous direction remains valid when rectification sends the VP
+        # to infinity (full strength), unlike dividing by its final w coordinate.
+        c, p = matrix @ center, matrix @ point
+        direction = p[:2] * c[2] - c[:2] * p[2]
+        roll_error = abs(_angle_from_vertical(*direction))
+    return roll_error, vertical_error, len(transformed)
 
 
 def _line_equation(segment: LineSegment) -> np.ndarray:
@@ -496,32 +484,58 @@ def auto_straighten_verticals(
         hough_threshold,
         min_line_length_ratio,
         max_line_gap,
-        vertical_tolerance_deg=max(15.0, max_correction_deg + 8.0),
+        vertical_tolerance_deg=25.0,
     )
     detected_correction_angle, level_confidence, level_debug = estimate_roll(
         initial_segments, max_correction_deg, detection_width
     )
+    # Estimate roll and convergence together from the ORIGINAL lines. A median
+    # of converging lines confuses perspective with rotation on asymmetric rooms.
+    source_vp, source_vp_confidence, source_vp_debug = estimate_vertical_vanishing_point(
+        initial_segments, detection_width, detection_height
+    )
+    joint_model = (
+        source_vp is not None and source_vp_confidence >= minimum_confidence
+        and level_debug.get("occupied_horizontal_buckets", 0) >= 3
+        and level_debug.get("horizontal_span_fraction", 0.0) >= 0.35
+        and abs(float(source_vp[1]) - detection_height / 2) > detection_height * 0.75
+    )
+    if joint_model:
+        direction = source_vp - np.array([detection_width / 2, detection_height / 2])
+        detected_correction_angle = _angle_from_vertical(*direction)
+        level_confidence = source_vp_confidence
+        level_debug["estimator"] = "joint_vertical_vanishing_point"
+        level_debug["center_vertical_offset_deg"] = round(detected_correction_angle, 4)
+        # Agreement with a convergence model replaces agreement with parallel lines.
+        level_debug["model_residual_deg"] = source_vp_debug.get("median_residual_deg", 99.0)
+    else:
+        level_debug["estimator"] = "parallel_line_median"
     correction_angle = detected_correction_angle
+    agreement = (level_debug.get("model_residual_deg", 99.0) if joint_model
+                 else level_debug.get("angle_mad_deg", 99.0))
     strong_spatial_evidence = (
         level_debug.get("occupied_horizontal_buckets", 0) >= 4
-        and level_debug.get("angle_mad_deg", 99.0) <= 1.0
+        and agreement <= 1.0
     )
     moderate_rotation_needs_more_evidence = abs(correction_angle) > 2.25 and (
         level_confidence < 0.72
         or level_debug.get("occupied_horizontal_buckets", 0) < 4
-        or level_debug.get("angle_mad_deg", 99.0) > 1.5
+        or agreement > 1.5
     )
     large_rotation_needs_more_evidence = abs(correction_angle) > 2.75 and (
         level_confidence < 0.72 or not strong_spatial_evidence
     )
     if (
         level_confidence < minimum_confidence
+        or abs(correction_angle) > max_correction_deg
         or moderate_rotation_needs_more_evidence
         or large_rotation_needs_more_evidence
     ):
         reasons = []
         if level_confidence < minimum_confidence:
             reasons.append("low confidence")
+        if abs(correction_angle) > max_correction_deg:
+            reasons.append("rotation exceeds limit")
         if moderate_rotation_needs_more_evidence or large_rotation_needs_more_evidence:
             reasons.append("large rotation lacks enough line agreement")
         warnings.append("Leveling skipped: " + ", ".join(reasons))
@@ -530,22 +544,8 @@ def auto_straighten_verticals(
         correction_angle = 0.0
 
     detect_rotation = _rotation_homography(detection_width, detection_height, correction_angle)
-    leveled_detection = cv2.warpPerspective(
-        working_bgr,
-        detect_rotation,
-        (detection_width, detection_height),
-        flags=cv2.INTER_CUBIC,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-    leveled_segments, _, debug_bgr = detect_vertical_segments(
-        leveled_detection,
-        canny_threshold1,
-        canny_threshold2,
-        hough_threshold,
-        min_line_length_ratio,
-        max_line_gap,
-        vertical_tolerance_deg=25.0,
-    )
+    leveled_segments = _transform_segments(initial_segments, detect_rotation)
+    debug_bgr = working_bgr.copy()
 
     original_rotation = _rotation_homography(original_width, original_height, correction_angle)
     combined = original_rotation
@@ -556,9 +556,12 @@ def auto_straighten_verticals(
     perspective_ratio = 0.0
 
     if mode in ("auto", "perspective"):
-        vanishing_point, perspective_confidence, perspective_debug = estimate_vertical_vanishing_point(
-            leveled_segments, detection_width, detection_height
-        )
+        perspective_confidence, perspective_debug = source_vp_confidence, source_vp_debug
+        if joint_model:
+            point = detect_rotation @ np.r_[source_vp, 1.0]
+            vanishing_point = point[:2] / point[2]
+        else:
+            perspective_debug = {**source_vp_debug, "reason": "insufficient_joint_geometry_evidence"}
         if vanishing_point is not None:
             vp_x_from_center = abs(float(vanishing_point[0]) - detection_width / 2.0) / detection_width
             vp_vertical_distance = abs(float(vanishing_point[1]) - detection_height / 2.0)
@@ -598,9 +601,14 @@ def auto_straighten_verticals(
     else:
         corrected, crop_fraction, warp_debug = _warp_and_crop(original_bgr, combined, crop_mode)
 
-    initial_roll_error, initial_vertical_error = _segment_errors(initial_segments, detection_width)
-    leveled_roll_error, leveled_vertical_error = _segment_errors(leveled_segments, detection_width)
+    validation_vp = source_vp if joint_model else None
+    initial_roll_error, initial_vertical_error, _ = _tracked_errors(
+        initial_segments, np.eye(3), detection_width, detection_height, validation_vp)
+    leveled_roll_error, leveled_vertical_error, _ = _tracked_errors(
+        initial_segments, detect_rotation, detection_width, detection_height, validation_vp)
+    to_full = np.diag([original_width / detection_width, original_height / detection_height, 1.0])
     validation_debug: dict = {
+        "method": "same_source_lines_and_center_direction",
         "initial_roll_error_deg": round(initial_roll_error, 4) if initial_roll_error is not None else None,
         "initial_vertical_error_deg": round(initial_vertical_error, 4) if initial_vertical_error is not None else None,
         "leveled_roll_error_deg": round(leveled_roll_error, 4) if leveled_roll_error is not None else None,
@@ -608,14 +616,9 @@ def auto_straighten_verticals(
     }
 
     if perspective_applied:
-        output_roll_error, output_vertical_error, output_line_count = _measure_output_errors(
-            corrected,
-            max_dimension,
-            canny_threshold1,
-            canny_threshold2,
-            hough_threshold,
-            min_line_length_ratio,
-            max_line_gap,
+        output_roll_error, output_vertical_error, output_line_count = _tracked_errors(
+            initial_segments, np.linalg.inv(to_full) @ combined @ to_full,
+            detection_width, detection_height, validation_vp,
         )
         validation_debug.update(
             {
@@ -636,6 +639,8 @@ def auto_straighten_verticals(
             and output_vertical_error is not None
             and output_vertical_error <= leveled_vertical_error - required_improvement
             and output_vertical_error <= initial_vertical_error - initial_required_improvement
+            and output_roll_error is not None and initial_roll_error is not None
+            and output_roll_error <= initial_roll_error + 0.08
         )
         if not perspective_improved:
             warnings.append("Perspective skipped because output line geometry did not improve")
@@ -664,14 +669,9 @@ def auto_straighten_verticals(
             corrected, crop_fraction, warp_debug = _warp_and_crop(original_bgr, combined, crop_mode)
 
     if not perspective_applied and abs(correction_angle) >= 0.01:
-        output_roll_error, output_vertical_error, output_line_count = _measure_output_errors(
-            corrected,
-            max_dimension,
-            canny_threshold1,
-            canny_threshold2,
-            hough_threshold,
-            min_line_length_ratio,
-            max_line_gap,
+        output_roll_error, output_vertical_error, output_line_count = _tracked_errors(
+            initial_segments, np.linalg.inv(to_full) @ combined @ to_full,
+            detection_width, detection_height, validation_vp,
         )
         validation_debug.update(
             {
@@ -689,6 +689,8 @@ def auto_straighten_verticals(
             initial_roll_error is not None
             and output_roll_error is not None
             and output_roll_error <= initial_roll_error - required_improvement
+            and output_vertical_error is not None and initial_vertical_error is not None
+            and output_vertical_error <= initial_vertical_error + 0.02
         )
         if not leveling_improved:
             warnings.append("Leveling skipped because output line geometry did not improve")

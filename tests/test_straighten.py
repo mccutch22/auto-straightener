@@ -1,4 +1,5 @@
 import unittest
+import math
 
 import cv2
 import numpy as np
@@ -17,6 +18,41 @@ def architectural_grid(width: int = 1200, height: int = 900) -> np.ndarray:
 
 
 class StraightenTests(unittest.TestCase):
+    def test_asymmetric_convergence_is_not_mistaken_for_camera_roll(self):
+        # More window edges on one side than the other used to rotate a level
+        # room toward that side. Cover upward/downward pitch and both roll signs.
+        for pitch in [-1, 1]:
+            for roll in [-1.0, 1.0]:
+                with self.subTest(pitch=pitch, roll=roll):
+                    width, height = 1200, 900
+                    cy, cx = height / 2, width / 2
+                    vy = cy + pitch * 6000
+                    vx = cx - math.tan(math.radians(roll)) * (vy - cy)
+                    image = np.full((height, width, 3), 235, np.uint8)
+                    for x in [100, 260, 430, 660, 730, 800, 870, 940, 1010, 1080]:
+                        slope = (vx - x) / (vy - cy)
+                        cv2.line(image, (round(x + slope * (60-cy)), 60),
+                                 (round(x + slope * (840-cy)), 840), (25,25,25), 5)
+                    result = auto_straighten_verticals(
+                        image, max_dimension=1400, minimum_confidence=.315,
+                        perspective_strength=.65, max_perspective_ratio=.364,
+                        max_crop_fraction=.234)
+                    self.assertTrue(result.perspective_applied, result.debug)
+                    self.assertAlmostEqual(result.correction_angle_deg, roll, delta=.25)
+                    validation = result.debug['validation']
+                    self.assertLess(validation['candidate_output_vertical_error_deg'],
+                                    validation['initial_vertical_error_deg'])
+                    self.assertLess(validation['candidate_output_roll_error_deg'], .1)
+
+                    if pitch == 1 and roll == -1.0:
+                        # If perspective is rejected, zeroing center tilt alone
+                        # would worsen total vertical alignment in this scene.
+                        fallback = auto_straighten_verticals(
+                            image, max_dimension=1400, minimum_confidence=.315,
+                            max_perspective_ratio=.01, max_crop_fraction=.234)
+                        self.assertEqual(fallback.applied_mode, 'none', fallback.debug)
+                        self.assertTrue(np.array_equal(fallback.corrected_bgr, image))
+
     def test_manual_export_filename_matches_original(self):
         self.assertEqual(
             normalized_match_key("Manual-correct-N 1163 Michigan Ave 001-.jpg"),

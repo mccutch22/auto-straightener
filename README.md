@@ -32,7 +32,7 @@ versions can be switched without another processing request.
 The source aspect ratio is preserved. Crops include interpolation margins and an inverse
 geometry check; they contain only source pixels. No replicated or invented scenery is
 delivered by this endpoint. Detection runs at a maximum 1400px; the final warp uses the
-full-resolution original. The PhotoDash v2 handheld preset uses 0.65 perspective
+full-resolution original. The PhotoDash handheld preset uses 0.65 perspective
 strength, 0.315 minimum confidence, 0.364 maximum perspective ratio, and 0.234 maximum
 crop fraction. These are 30% more aggressive than v1 (confidence is reduced by 30%).
 Corrections that discard more than 23.4% of valid area are skipped. Large-rotation
@@ -79,7 +79,18 @@ Automatic leveling defaults to a five-degree ceiling. Corrections over 2.25 degr
 
 Perspective correction defaults to half strength. The setting was calibrated against manually corrected real-estate photos to avoid the over-stretched look produced by full geometric rectification; callers can still request any strength from `0.0` through `1.0`.
 
-Every candidate correction is analyzed a second time after transformation. If the measured line geometry did not improve, the service falls back from perspective to level-only correction, or from level-only correction to the untouched original.
+Version `photodash-verticals-3` estimates camera roll and vertical convergence jointly
+from source architectural lines. This prevents an asymmetric set of converging window
+edges from being mistaken for a tilted camera. The fitted vanishing point is carried
+through rotation instead of being fitted again to a different set of edges.
+
+Validation follows the same source lines through the proposed transformation, using
+fixed source weights and horizontal groups. Cropping or resampling cannot improve a
+score merely by changing which edges are detected. Perspective must improve vertical
+alignment without worsening the modeled center direction; a rotation-only fallback
+must improve roll without worsening overall vertical alignment. Otherwise the service
+preserves the original. This does not correct lens curvature or local AI distortions
+that cannot be represented by a single projective transform.
 
 ## Run locally
 
