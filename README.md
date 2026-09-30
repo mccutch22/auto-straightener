@@ -94,6 +94,15 @@ that cannot be represented by a single projective transform.
 
 ## Run locally
 
+Version `photodash-verticals-4` also provides authenticated `POST /v1/adjust`.
+Send the source image as the raw request body, with query parameters `rotation`
+(-15 to 15 degrees, positive clockwise), `vertical` (-100 to 100), and
+`horizontal` (-100 to 100). The response uses the same image/metadata envelope
+as `/v1/straighten`. Manual adjustments bypass line-detection confidence checks;
+a deterministic projective transform and centered safe crop avoid exposed
+borders. PhotoDash mirrors this geometry in its live preview, saves at source
+resolution after cropping, and retains the original for reversible changes.
+
 ```bash
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 10000
