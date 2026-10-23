@@ -2,6 +2,10 @@
 import base64
 import json
 import threading
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from io import BytesIO
 
 import cv2
@@ -14,7 +18,7 @@ from .straighten import auto_straighten_verticals
 
 router = APIRouter()
 busy = threading.Lock()
-VERSION = "photodash-verticals-4"
+VERSION = "photodash-verticals-5"
 MAX_BYTES = 32 * 1024 * 1024
 MAX_PIXELS = 24_000_000
 cv2.setNumThreads(1)
@@ -84,6 +88,30 @@ async def handle_binary(request, authorization, manual=None):
             data.extend(chunk)
             if len(data) > MAX_BYTES:
                 raise HTTPException(413, "Photo must be smaller than 32 MB")
-        return await run_in_threadpool(process, bytes(data), manual)
+        return await run_in_threadpool(process_bounded, bytes(data), manual)
     finally:
         busy.release()
+
+
+def process_bounded(data: bytes, manual=None):
+    """A stalled OpenCV call must not hold the service-wide lock forever.
+
+    Run the correction in a child process, with no storage or model calls.
+    Timeout kills and waits for that child before the request releases the lock.
+    """
+    with tempfile.TemporaryDirectory(prefix="photodash-correction-") as folder:
+        source = Path(folder) / "input.jpg"
+        output = Path(folder) / "result.json"
+        source.write_bytes(data)
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "app.correction_task", str(source), str(output), json.dumps(manual)],
+                timeout=85, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise HTTPException(503, "Correction timed out; original preserved") from error
+        except subprocess.CalledProcessError as error:
+            raise HTTPException(422 if error.returncode == 22 else 503, "Correction unavailable; original preserved") from error
+        if output.stat().st_size > 48 * 1024 * 1024:
+            raise HTTPException(503, "Correction response too large")
+        return json.loads(output.read_text())
