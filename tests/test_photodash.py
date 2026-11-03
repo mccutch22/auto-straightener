@@ -28,7 +28,7 @@ class PhotoDashTests(unittest.TestCase):
                 validation = result['geometry']['validation']
                 self.assertLess(validation['candidate_output_vertical_error_deg'],
                                 validation['initial_vertical_error_deg'])
-                self.assertLessEqual(result['cropFraction'], .234)
+                self.assertLessEqual(result['cropFraction'], .3042)
                 self.assertEqual(result['width'] * 900, result['height'] * 1200)
 
     def test_handheld_preset_preserves_ambiguous_single_line(self):

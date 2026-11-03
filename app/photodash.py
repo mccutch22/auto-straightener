@@ -18,7 +18,7 @@ from .straighten import auto_straighten_verticals
 
 router = APIRouter()
 busy = threading.Lock()
-VERSION = "photodash-verticals-5"
+VERSION = "photodash-verticals-6"
 MAX_BYTES = 32 * 1024 * 1024
 MAX_PIXELS = 24_000_000
 cv2.setNumThreads(1)
@@ -48,8 +48,8 @@ def process(data: bytes, manual: tuple | None = None):
     else:
         result = auto_straighten_verticals(
             original, max_dimension=1400, crop_mode="crop",
-            perspective_strength=0.65, minimum_confidence=0.315,
-            max_perspective_ratio=0.364, max_crop_fraction=0.234,
+            max_correction_deg=6.5, perspective_strength=0.845, minimum_confidence=0.315,
+            max_perspective_ratio=0.4732, max_crop_fraction=0.3042,
         )
     metadata = dict(version=VERSION, outcome="corrected" if result.applied_mode != "none" else "unchanged",
                     mode=result.applied_mode, rotation=result.correction_angle_deg, confidence=result.confidence,
