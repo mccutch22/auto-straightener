@@ -32,10 +32,9 @@ versions can be switched without another processing request.
 The source aspect ratio is preserved. Crops include interpolation margins and an inverse
 geometry check; they contain only source pixels. No replicated or invented scenery is
 delivered by this endpoint. Detection runs at a maximum 1400px; the final warp uses the
-full-resolution original. The PhotoDash automatic preset allows up to 6.5 degrees of roll correction and uses
-0.845 perspective strength with a maximum perspective ratio of 0.4732. The crop
-may discard up to 30.42% of valid area. Each of these limits is 30% higher
-than v5. The minimum confidence is 0.315. Corrections still require supporting
+full-resolution original. The PhotoDash automatic preset allows up to 7 degrees of roll correction and uses
+0.93 perspective strength with a maximum perspective ratio of 0.4732. The crop
+may discard up to 30.42% of valid area. The minimum confidence is 0.315. Corrections still require supporting
 lines and improved output geometry.
 
 Render: Docker runtime, one worker, `/health` health check. Set `API_TOKEN`; the Dockerfile
