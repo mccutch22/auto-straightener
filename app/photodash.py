@@ -1,4 +1,5 @@
 """Private binary API: no remote URL downloads and no storage credentials required."""
+import asyncio
 import base64
 import json
 import threading
@@ -18,7 +19,8 @@ from .straighten import auto_straighten_verticals
 
 router = APIRouter()
 busy = threading.Lock()
-VERSION = "photodash-verticals-7"
+VERSION = "photodash-verticals-8"
+UPLOAD_TIMEOUT_SECONDS = 30
 MAX_BYTES = 32 * 1024 * 1024
 MAX_PIXELS = 24_000_000
 cv2.setNumThreads(1)
@@ -83,11 +85,16 @@ async def handle_binary(request, authorization, manual=None):
     if not busy.acquire(blocking=False):
         raise HTTPException(429, "Worker is busy; retry shortly", headers={"Retry-After": "5"})
     try:
+        # Uploads hold the same lock as processing and must also be bounded.
         data = bytearray()
-        async for chunk in request.stream():
-            data.extend(chunk)
-            if len(data) > MAX_BYTES:
-                raise HTTPException(413, "Photo must be smaller than 32 MB")
+        try:
+            async with asyncio.timeout(UPLOAD_TIMEOUT_SECONDS):
+                async for chunk in request.stream():
+                    data.extend(chunk)
+                    if len(data) > MAX_BYTES:
+                        raise HTTPException(413, "Photo must be smaller than 32 MB")
+        except TimeoutError as error:
+            raise HTTPException(408, "Image upload timed out; retry the correction") from error
         return await run_in_threadpool(process_bounded, bytes(data), manual)
     finally:
         busy.release()
